@@ -24,6 +24,9 @@ pub(crate) use caliptra_mcu_userlog::{Bytes, Dbg, Hex32};
 pub use caliptra_mcu_libsyscall_caliptra::console_writeln;
 
 pub(crate) mod auth_keys;
+// Certificate-store boot is the only borrower, so this shares its gate.
+#[cfg(feature = "spdm")]
+mod boot_scratch;
 // Only the feature-gated command services below construct
 // `CaliptraCmdBackend`; without them the whole module is unused.
 #[cfg_attr(
@@ -129,7 +132,15 @@ pub(crate) async fn async_main() {
     .await;
 
     #[cfg(feature = "spdm")]
-    match cert_store::boot_init().await {
+    let cert_store_ready = {
+        // SPDM's MCTP task pool is idle until its responder starts.
+        // SAFETY: the scratch is dropped before `spawn_spdm_tasks` below.
+        let scratch = unsafe { spdm::borrow_boot_scratch() };
+        cert_store::boot_init(&scratch).await
+    };
+
+    #[cfg(feature = "spdm")]
+    match cert_store_ready {
         Ok(()) => {
             spdm::spawn_spdm_tasks(&EXECUTOR.get().spawner());
         }

@@ -14,6 +14,7 @@ mod pci_sig_vdm;
 
 #[cfg(feature = "test-doe-spdm-tdisp-ide-validator")]
 use self::pci_sig_vdm::{emulated_ide_km::EmulatedIdeDriver, emulated_tdisp::EmulatedTdispDriver};
+use crate::boot_scratch::BootScratch;
 #[cfg(feature = "doe")]
 use caliptra_mcu_libsyscall_caliptra::doe;
 use caliptra_mcu_libsyscall_caliptra::mci::Mci;
@@ -258,6 +259,32 @@ fn measurement_provider(
     )
 }
 
+#[repr(C, align(64))]
+struct MctpScratch([u8; MCTP_SPDM_SCRATCH_SIZE]);
+
+/// MCTP responder pool, lent to boot initialization before the responder starts.
+static mut MCTP_SCRATCH: MctpScratch = MctpScratch([0u8; MCTP_SPDM_SCRATCH_SIZE]);
+
+const _: () = assert!(
+    MCTP_SPDM_SCRATCH_SIZE >= crate::cert_store::BOOT_SCRATCH_SIZE,
+    "MCTP SPDM scratch pool is too small to lend to certificate-store boot"
+);
+
+/// Borrows the idle MCTP task pool for boot initialization.
+///
+/// # Safety
+///
+/// Call before [`spawn_spdm_tasks`] and drop the returned scratch before calling
+/// it: the MCTP responder takes exclusive ownership of the pool when it starts.
+pub(crate) unsafe fn borrow_boot_scratch() -> BootScratch {
+    // SAFETY: the pool is 64-byte aligned, and the caller keeps the responder
+    // from starting until the scratch is dropped.
+    BootScratch::new(
+        NonNull::new_unchecked(core::ptr::addr_of_mut!(MCTP_SCRATCH).cast::<u8>()),
+        MCTP_SPDM_SCRATCH_SIZE,
+    )
+}
+
 /// Spawn SPDM responder tasks after [`crate::cert_store::boot_init`] succeeds.
 pub(crate) fn spawn_spdm_tasks(spawner: &Spawner) {
     let mut cw = Console::<DefaultSyscalls>::writer();
@@ -277,10 +304,8 @@ pub(crate) fn spawn_spdm_tasks(spawner: &Spawner) {
 async fn spdm_mctp_responder() {
     let mut cw = Console::<DefaultSyscalls>::writer();
 
-    #[repr(C, align(64))]
-    struct ScratchBuf([u8; MCTP_SPDM_SCRATCH_SIZE]);
-    static mut MCTP_SCRATCH: ScratchBuf = ScratchBuf([0u8; MCTP_SPDM_SCRATCH_SIZE]);
-    // SAFETY: this task is the sole owner of `MCTP_SCRATCH`.
+    // SAFETY: the boot scratch was dropped before this task was spawned, so it
+    // is now the sole owner of `MCTP_SCRATCH`.
     let scratch_ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(MCTP_SCRATCH.0.as_mut_ptr()) };
     debug_assert_eq!(scratch_ptr.as_ptr() as usize % BITMAP_SLOT_SIZE, 0);
 
